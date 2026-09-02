@@ -1,6 +1,41 @@
 # omp-go-test1 — 班级成绩管理系统
 
-Go 实现的班级成绩管理系统:`grade` 包提供领域逻辑(学生/课程/成绩、统计、排名、JSON 持久化),`gradecli` 提供命令行界面。
+Go 实现的班级成绩管理系统,三种使用方式:
+
+- **`gradeserver`** — 全栈版: PostgreSQL 数据库 + JSON HTTP API + 内嵌单页前端
+- **`gradecli`** — 命令行版: 内存 + JSON 文件持久化
+- **`grade`** — 领域库: 两套实现(`System` 内存版 / `DB` Postgres 版)共享同一套领域错误与统计逻辑
+
+## 全栈版 (gradeserver)
+
+启动数据库并运行服务:
+
+```bash
+docker run -d --name grades-db \
+  -e POSTGRES_USER=grades -e POSTGRES_PASSWORD=grades -e POSTGRES_DB=grades \
+  -p 5432:5432 postgres:16-alpine
+
+go run ./cmd/gradeserver -addr :8080
+# 或用 DATABASE_URL 指定连接串
+```
+
+启动时自动建表(`Migrate` 幂等)。浏览器打开 http://localhost:8080 使用前端。
+
+### HTTP API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/api/students` | 列出 / 添加学生 `{id, name}` |
+| DELETE | `/api/students/{id}` | 删除学生(级联成绩) |
+| GET | `/api/students/{id}/scores` | 学生成绩 + 总分/平均分 |
+| GET/POST | `/api/courses` | 列出 / 添加课程 `{id, name}` |
+| DELETE | `/api/courses/{id}` | 删除课程(级联成绩) |
+| GET | `/api/courses/{id}/stats` | 人数/平均分/最高/最低/及格率 |
+| POST | `/api/scores` | 录入成绩 `{student_id, course_id, value}` |
+| PUT/DELETE | `/api/scores/{sid}/{cid}` | 修改 / 删除成绩 |
+| GET | `/api/ranking` | 全班排名(按平均分, 并列同名次, 无成绩排最后) |
+
+错误以 JSON 返回: 404 不存在 / 409 重复 / 400 分数越界(0–100)。
 
 ## 构建与运行
 
@@ -53,4 +88,7 @@ sys, _ = grade.LoadFromFile("grades.json")
 
 ```bash
 go test ./...
+
+# Postgres 集成测试需要 TEST_DATABASE_URL, 未设置时自动跳过:
+TEST_DATABASE_URL="postgres://grades:grades@localhost:5432/grades?sslmode=disable" go test ./...
 ```
