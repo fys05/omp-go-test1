@@ -1,0 +1,187 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.22"
+  REGISTRY: ghcr.io
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go mod tidy
+        run: go mod tidy
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt check
+        run: |
+          fmt_output=$(gofmt -l . 2>&1)
+          if [ -n "$fmt_output" ]; then
+            echo "Files not formatted:"
+            echo "$fmt_output"
+            exit 1
+          fi
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: grades
+          POSTGRES_PASSWORD: grades
+          POSTGRES_DB: grades
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U grades"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go mod tidy
+        run: go mod tidy
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+        env:
+          TEST_DATABASE_URL: postgres://grades:grades@localhost:5432/grades?sslmode=disable
+      - name: Coverage
+        run: go tool cover -func=coverage.out | tail -1
+
+  build-and-push:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.lc.outputs.image }}
+      image_tag: ${{ steps.lc.outputs.image }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: lc
+        run: echo "image=$(echo '${{ env.REGISTRY }}/${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.lc.outputs.image }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    concurrency:
+      group: production-${{ vars.K8S_NAMESPACE }}-${{ vars.APP_NAME }}-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.31.0"
+      - name: Preflight and build kubeconfig
+        env:
+          CERT: ${{ secrets.K8S_CLIENT_CERT }}
+          KEY: ${{ secrets.K8S_CLIENT_KEY }}
+          CA_B64: ${{ secrets.K8S_CA_CERT }}
+          HOST: ${{ vars.K8S_HOST }}
+          PORT: ${{ vars.K8S_PORT }}
+          K8S_EXPECTED_API_SERVER: ${{ vars.K8S_EXPECTED_API_SERVER }}
+          K8S_EXPECTED_CA_SHA256: ${{ vars.K8S_EXPECTED_CA_SHA256 }}
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -eu
+          : "${K8S_EXPECTED_API_SERVER:?required}"; : "${K8S_EXPECTED_CA_SHA256:?required}"; : "${K8S_NAMESPACE:?required}"; : "${IMAGE_DIGEST:?required image tag}"
+          test "${IMAGE_DIGEST#*:}" != "${IMAGE_DIGEST}"
+          mkdir -p ~/.kube
+          echo "$CERT" | base64 -d > /tmp/k8s-cert.pem
+          echo "$KEY" | base64 -d > /tmp/k8s-key.pem
+          echo "$CA_B64" | base64 -d > /tmp/k8s-ca.pem
+          openssl x509 -in /tmp/k8s-ca.pem -outform DER -out /tmp/k8s-ca.der
+          test "$(sha256sum /tmp/k8s-ca.der | cut -d ' ' -f1)" = "$K8S_EXPECTED_CA_SHA256"
+          kubectl config set-cluster k8s --server="https://${HOST}:${PORT}" --certificate-authority=/tmp/k8s-ca.pem --tls-server-name=kubernetes
+          kubectl config set-credentials admin --client-certificate=/tmp/k8s-cert.pem --client-key=/tmp/k8s-key.pem
+          kubectl config set-context production --cluster=k8s --user=admin --namespace="${K8S_NAMESPACE}"
+          kubectl config use-context production
+          test "$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" = "$K8S_EXPECTED_API_SERVER"
+          require_can_i() {
+            test "$(kubectl auth can-i "$@")" = "yes"
+          }
+          require_can_i get pods -n "${K8S_NAMESPACE}"
+          require_can_i create deployments.apps -n "${K8S_NAMESPACE}"
+          kubectl create configmap preflight-admission-check --from-literal=commit="${{ github.sha }}" -n "${K8S_NAMESPACE}" --dry-run=server -o yaml >/dev/null
+          jq -n --arg api "$K8S_EXPECTED_API_SERVER" --arg ca "$K8S_EXPECTED_CA_SHA256" --arg sha "${{ github.sha }}" --arg ref "${{ github.ref }}" --arg run "$GITHUB_RUN_ID" '{status:"PASS",api_server:$api,ca_sha256:$ca,commit_sha:$sha,ref:$ref,run_id:$run}' > preflight.json
+          jq -e --arg sha "${{ github.sha }}" --arg ref "${{ github.ref }}" --arg api "$K8S_EXPECTED_API_SERVER" --arg ca "$K8S_EXPECTED_CA_SHA256" '.status == "PASS" and .api_server == $api and .ca_sha256 == $ca and .commit_sha == $sha and .ref == $ref and (.run_id|tostring) == (env.GITHUB_RUN_ID|tostring)' preflight.json >/dev/null
+      - name: Deploy app
+        env:
+          NS: ${{ vars.K8S_NAMESPACE }}
+          IMG: ${{ needs.build-and-push.outputs.image_tag }}
+          APP: ${{ vars.APP_NAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          set -eu
+          test "${IMG#*:}" != "${IMG}" && test -n "${NS}" && test -n "${APP}" && test -n "${DOMAIN}" && test -n "${DB_PASSWORD}"
+          sed -i "s|\${IMAGE_DIGEST}|${IMG}|g" k8s/app/deployment.yaml
+          sed -i "s|\${K8S_NAMESPACE}|${NS}|g" k8s/app/*.yaml
+          sed -i "s|\${APP_NAME}|${APP}|g" k8s/app/*.yaml
+          # Database credentials secret consumed by both the app (DATABASE_URL)
+          # and the Postgres workload (POSTGRES_PASSWORD).
+          kubectl create secret generic "${APP}-db" -n "${NS}" \
+            --from-literal=POSTGRES_PASSWORD="${DB_PASSWORD}" \
+            --from-literal=DATABASE_URL="postgres://grades:${DB_PASSWORD}@${APP}-db:5432/grades?sslmode=disable" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl diff -f k8s/app/ || true
+          kubectl apply --server-side --dry-run=server -f k8s/app/
+          kubectl apply -f k8s/app/
+          kubectl rollout status deployment/${APP} -n ${NS} --timeout=120s
+          kubectl rollout status deployment/${APP}-db -n ${NS} --timeout=120s
+          kubectl get pods -l app=${APP} -n ${NS}
+          READY=$(kubectl get pods -l app=${APP} -n ${NS} --no-headers | awk '{print $2}' | grep -c '1/1\|2/2\|3/3')
+          if [ "$READY" -eq 0 ]; then
+            echo "ERROR: No pods are Ready. Check pod logs:"
+            kubectl logs -l app=${APP} -n ${NS} --tail=10
+            exit 1
+          fi
+          echo "Pod readiness check: $READY pod(s) Ready"
+      - name: Smoke test
+        env:
+          APP: ${{ vars.APP_NAME }}
+          NS: ${{ vars.K8S_NAMESPACE }}
+          DOMAIN: ${{ vars.DOMAIN }}
+        run: |
+          set -eu
+          # Cluster-internal smoke test: run a curl pod against the Service DNS
+          # (external DNS for *.steedgrace.com is not reachable from CI runners).
+          kubectl run "${APP}-smoke" -n "${NS}" --rm -i --restart=Never \
+            --image=curlimages/curl:latest --timeout=120s -- \
+            sh -c 'set -e
+            BASE="http://'"${APP}"':8080"
+            curl -sf "$BASE/healthz" | grep -q ok
+            curl -sf -X POST "$BASE/api/students" -H "Content-Type: application/json" -d "{\"id\":\"smoke-s1\",\"name\":\"Smoke\"}" > /dev/null
+            curl -sf -X POST "$BASE/api/courses" -H "Content-Type: application/json" -d "{\"id\":\"smoke-c1\",\"name\":\"SmokeCourse\"}" > /dev/null
+            curl -sf -X POST "$BASE/api/scores" -H "Content-Type: application/json" -d "{\"student_id\":\"smoke-s1\",\"course_id\":\"smoke-c1\",\"value\":88}" > /dev/null
+            curl -sf "$BASE/api/courses/smoke-c1/stats" | grep -q "\"count\":1"
+            curl -sf -X DELETE "$BASE/api/students/smoke-s1" > /dev/null
+            curl -sf -X DELETE "$BASE/api/courses/smoke-c1" > /dev/null
+            echo SMOKE_OK'

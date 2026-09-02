@@ -62,7 +62,20 @@ func (s *server) routes() {
 	s.mux.HandleFunc("/api/scores", s.handleScores)         // POST create
 	s.mux.HandleFunc("/api/scores/", s.handleScoreByKey)    // PUT update, DELETE remove
 	s.mux.HandleFunc("/api/ranking", s.handleRanking)       // GET ranking
-	s.mux.HandleFunc("/", s.handleIndex)                    // frontend
+	s.mux.HandleFunc("/healthz", s.handleHealthz)           // liveness/readiness probe
+	s.mux.HandleFunc("/", s.handleIndex)                    // frontend (catch-all, last)
+}
+
+// handleHealthz pings the database so K8s probes reflect real readiness.
+func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		http.Error(w, "db unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintln(w, "ok")
 }
 
 // ---- helpers ----

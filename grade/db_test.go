@@ -32,7 +32,8 @@ func testDB(t *testing.T) *DB {
 func TestDBStudentCourseLifecycle(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
-	// isolate from other runs
+	// isolate from other runs (courses cascade their scores)
+	d.db.ExecContext(ctx, `DELETE FROM courses WHERE id LIKE 't1-%'`)
 	d.db.ExecContext(ctx, `DELETE FROM students WHERE id LIKE 't1-%'`)
 
 	if err := d.AddStudent("t1-s1", "测试甲"); err != nil {
@@ -60,6 +61,7 @@ func TestDBStudentCourseLifecycle(t *testing.T) {
 func TestDBScoreLifecycleAndCascade(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
+	d.db.ExecContext(ctx, `DELETE FROM courses WHERE id LIKE 't2-%'`)
 	d.db.ExecContext(ctx, `DELETE FROM students WHERE id LIKE 't2-%'`)
 
 	d.AddStudent("t2-s1", "甲")
@@ -98,6 +100,7 @@ func TestDBScoreLifecycleAndCascade(t *testing.T) {
 func TestDBStatsAndRanking(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
+	d.db.ExecContext(ctx, `DELETE FROM courses WHERE id LIKE 't3-%'`)
 	d.db.ExecContext(ctx, `DELETE FROM students WHERE id LIKE 't3-%'`)
 
 	d.AddStudent("t3-s1", "甲")

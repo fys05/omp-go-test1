@@ -40,6 +40,9 @@ func OpenDB(dsn string) (*DB, error) {
 // Close releases the connection pool.
 func (d *DB) Close() error { return d.db.Close() }
 
+// PingContext checks database liveness.
+func (d *DB) PingContext(ctx context.Context) error { return d.db.PingContext(ctx) }
+
 // Migrate creates the schema if it does not yet exist. Safe to run on every
 // startup.
 func (d *DB) Migrate(ctx context.Context) error {
