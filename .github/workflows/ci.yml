@@ -139,12 +139,14 @@ jobs:
           IMG: ${{ needs.build-and-push.outputs.image_tag }}
           APP: ${{ vars.APP_NAME }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DOMAIN: ${{ vars.DOMAIN }}
         run: |
           set -eu
           test "${IMG#*:}" != "${IMG}" && test -n "${NS}" && test -n "${APP}" && test -n "${DOMAIN}" && test -n "${DB_PASSWORD}"
           sed -i "s|\${IMAGE_DIGEST}|${IMG}|g" k8s/app/deployment.yaml
           sed -i "s|\${K8S_NAMESPACE}|${NS}|g" k8s/app/*.yaml
           sed -i "s|\${APP_NAME}|${APP}|g" k8s/app/*.yaml
+          sed -i "s|\${DOMAIN}|${DOMAIN}|g" k8s/app/*.yaml
           # Database credentials secret consumed by both the app (DATABASE_URL)
           # and the Postgres workload (POSTGRES_PASSWORD).
           kubectl create secret generic "${APP}-db" -n "${NS}" \
