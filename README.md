@@ -37,6 +37,15 @@ go run ./cmd/gradeserver -addr :8080
 
 错误以 JSON 返回: 404 不存在 / 409 重复 / 400 分数越界(0–100)。
 
+## 部署 (K8s)
+
+`k8s/app/` 含应用与 PostgreSQL 的 Deployment/Service/Ingress;`.github/workflows/ci.yml` 提供 lint → test(带 Postgres service) → 构建镜像 → 部署 → 集群内 smoke test 的完整流水线。需配置的 GitHub secrets/vars:
+
+- secrets: `K8S_CLIENT_CERT` / `K8S_CLIENT_KEY` / `K8S_CA_CERT` / `DB_PASSWORD`
+- vars: `K8S_HOST` / `K8S_PORT` / `K8S_NAMESPACE` / `K8S_EXPECTED_API_SERVER` / `K8S_EXPECTED_CA_SHA256` / `APP_NAME` / `DOMAIN`
+
+部署时由 CI 创建 `${APP_NAME}-db` secret(含 `DATABASE_URL` 与 `POSTGRES_PASSWORD`),数据库与应用同命名空间内网通信。
+
 ## 构建与运行
 
 ```bash
