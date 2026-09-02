@@ -148,6 +148,7 @@ jobs:
       - name: Smoke test
         env:
           APP: ${{ vars.APP_NAME }}
+          NS: ${{ vars.K8S_NAMESPACE }}
           DOMAIN: ${{ vars.DOMAIN }}
         run: |
           set -eu
